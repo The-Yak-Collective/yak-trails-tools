@@ -1,0 +1,59 @@
+#!/usr/bin/env python
+
+from datetime import date, datetime
+import os
+import logging
+from pathlib import Path
+import traceback
+
+from googleapiclient.discovery import build
+from google.oauth2 import service_account
+
+logging.basicConfig(level=logging.INFO)
+
+
+credentials = service_account.Credentials.from_service_account_file(
+    "google_credentials.json",
+    scopes=[
+        "https://www.googleapis.com/auth/spreadsheets",
+    ],
+)
+
+weekly_standups_id = "10ry1exfV19X1OUOjaCYsRUxbqjroDBSaJ9N5iFIUbyw"
+
+
+def run(save_to: str, start_at: date) -> None:
+    try:
+        service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
+        spread = "'Form Responses 1'!A:F"
+        service.spreadsheets().values().get(
+            spreadsheetId=weekly_standups_id,
+            range=spread,
+        ).execute()
+
+        # TODO
+
+        logging.info(f"Markdown exported to {save_to}")
+    except:
+        logging.error(f"Failed in conversion: {traceback.format_exc()}")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Fetches weekly standups from the project Google sheet and transform it into Markdown files"
+    )
+    parser.add_argument(
+        "save_to",
+        default="./weekly_standups",
+        help="Directory where to save the output",
+    )
+    parser.add_argument(
+        "--from", default=datetime.now().date(), help="Date to start converting from."
+    )
+    args = parser.parse_args()
+
+    Path(args.save_to).mkdir(parents=True, exist_ok=True)
+
+    run(args.save_to, args.start_at)
