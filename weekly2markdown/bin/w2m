@@ -1,37 +1,103 @@
 #!/usr/bin/env python
 
-from datetime import date, datetime
+from datetime import date
 import os
 import logging
 from pathlib import Path
 import traceback
 
-from googleapiclient.discovery import build
+from dateutil.parser import parse as date_parser
+from google.auth.transport.requests import Request
 from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 
 logging.basicConfig(level=logging.INFO)
 
 
-credentials = service_account.Credentials.from_service_account_file(
-    "google_credentials.json",
-    scopes=[
-        "https://www.googleapis.com/auth/spreadsheets",
-    ],
-)
-
+scopes = [
+    "https://www.googleapis.com/auth/spreadsheets",
+]
 weekly_standups_id = "10ry1exfV19X1OUOjaCYsRUxbqjroDBSaJ9N5iFIUbyw"
+
+
+def credentials() -> Credentials:
+    credentials = None
+    token_file = "/tmp/yak_weekly_standus_conversion_token.json"
+    if os.path.exists(token_file):
+        credentials = Credentials.from_authorized_user_file(token_file, scopes)
+    if not credentials or not credentials.valid:
+        if credentials and credentials.expired and credentials.refresh_token:
+            credentials.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", scopes)
+            credentials = flow.run_local_server(port=0)
+        with open(token_file, "w") as token:
+            token.write(credentials.to_json())
+    return credentials
+
+
+def to_markdown(data:dict) -> dict:
+    mdata = {}
+    for build, package in data.items():
+        fname = f"{build.lower().replace(' ', '_')}.md"
+        doc = []
+        doc.append(build); doc.append("=" * len(build))
+        _dates = sorted(package.keys())
+        for entry_date in _dates:
+            date_str = str(entry_date)
+            doc.append(date_str); doc.append("-" * len(date_str))
+            for question, answer in package[entry_date].items():
+                doc.append(f"### {question}")
+                doc.append(answer)
+            doc.append("\n")
+        mdata[fname] = "\n".join(doc)
+    return mdata
 
 
 def run(save_to: str, start_at: date) -> None:
     try:
-        service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
+        service = build(
+            "sheets", "v4", credentials=credentials(), cache_discovery=False
+        )
         spread = "'Form Responses 1'!A:F"
-        service.spreadsheets().values().get(
-            spreadsheetId=weekly_standups_id,
-            range=spread,
-        ).execute()
+        result = (
+            service.spreadsheets()
+            .values()
+            .get(
+                spreadsheetId=weekly_standups_id,
+                range=spread,
+            )
+            .execute()
+        )
 
-        # TODO
+        entries = result.get("values", [])
+        columns = entries[0]
+        data = {}
+        for entry in entries[1:]:
+            try:
+                entry_date = date_parser(entry[0]).date()
+                if entry_date < start_at:
+                    continue
+                else:
+                    try:
+                        data[entry[1]]
+                    except KeyError:
+                        data[entry[1]] = {}
+                    if entry_date in data[entry[1]]:
+                        logging.warning(f"Duplicate found for '{entry[1]}' on {entry[0]}. Will keep the last one only")
+                    _data = dict(zip(columns[1:], entry[1:]))
+                    data[entry[1]][entry_date] = _data
+            except:
+                logging.error(f"Failed and skipping for entry at {entry[0]}: {traceback.format_exc()}")
+
+        mdata = to_markdown(data)
+
+        for path, md in mdata.items():
+            to = os.path.join(save_to, path)
+            with open(to, "w") as f:
+                f.write(md)
 
         logging.info(f"Markdown exported to {save_to}")
     except:
@@ -45,15 +111,19 @@ if __name__ == "__main__":
         description="Fetches weekly standups from the project Google sheet and transform it into Markdown files"
     )
     parser.add_argument(
-        "save_to",
+        "--save_to",
         default="./weekly_standups",
         help="Directory where to save the output",
     )
     parser.add_argument(
-        "--from", default=datetime.now().date(), help="Date to start converting from."
+        "--from-date",
+        dest="from_date",
+        default=str(date.today()),
+        help="Date to start converting from.",
     )
     args = parser.parse_args()
 
     Path(args.save_to).mkdir(parents=True, exist_ok=True)
+    start_at = date_parser(args.from_date).date()
 
-    run(args.save_to, args.start_at)
+    run(args.save_to, start_at)
